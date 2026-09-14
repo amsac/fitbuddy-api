@@ -15,7 +15,7 @@ Database settings remain in `application.properties`. Start with `./mvnw spring-
 
 ## API
 
-Only `POST /auth/register` and `POST /auth/login` are public. Browser CORS preflights are handled by Spring Security.
+`POST /auth/register`, `POST /auth/login`, and `GET /health` (also `HEAD`) are public. Browser CORS preflights are handled by Spring Security.
 
 Register with:
 
@@ -61,3 +61,9 @@ Keep password-reset tokens in a separate future entity when implementing that fe
 Run `./mvnw test`. Tests use an isolated H2 database in PostgreSQL compatibility mode and a test-only signing key; they do not use the hosted database. They exercise the HTTP security chain, BCrypt, signed tokens, validation, duplicate email, login, current user, invalid tokens, inactive users, CORS, both roles creating templates, and cross-user ownership checks. PostgreSQL deployment and client integration still require environment-specific verification.
 
 Implementation references: [Spring Security password authentication](https://docs.spring.io/spring-security/reference/servlet/authentication/passwords/index.html) and [JJWT documentation](https://github.com/jwtk/jjwt).
+
+## Uptime monitoring
+
+After deploying, configure an HTTP monitor for `https://<your-service>.onrender.com/health` with a 5-minute interval. No authentication headers are required. GET returns HTTP 200 with `{"status":"UP"}`; HEAD is also supported. This is a lightweight application liveness check, not a database readiness check.
+
+Render documents a 15-minute inbound-traffic inactivity threshold for free services. Regular requests should avoid that inactivity window, but cannot guarantee continuous availability: free instance quotas, restarts, and platform maintenance still apply. See https://render.com/docs/free.

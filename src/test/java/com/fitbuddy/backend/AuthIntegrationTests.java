@@ -183,6 +183,18 @@ class AuthIntegrationTests {
                 .andExpect(status().isOk()).andExpect(header().exists("Access-Control-Allow-Origin"));
     }
 
+    @Test
+    void healthIsPublicWithoutExposingOtherEndpoints() throws Exception {
+        mvc.perform(get("/health"))
+                .andExpect(status().isOk())
+                .andExpect(content().json("{\"status\":\"UP\"}"))
+                .andExpect(header().string("Cache-Control", "no-store"));
+        mvc.perform(head("/health")).andExpect(status().isOk());
+        mvc.perform(post("/health")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/auth/me")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/templates")).andExpect(status().isUnauthorized());
+    }
+
     private String register(String email, String role) throws Exception {
         String response = mvc.perform(post("/auth/register").contentType(MediaType.APPLICATION_JSON)
                 .content("""
