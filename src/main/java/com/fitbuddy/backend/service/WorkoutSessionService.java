@@ -12,5 +12,5 @@ public interface WorkoutSessionService {
     WorkoutSessionResponse startSession(StartSessionRequest request);
     SessionDetailsResponse getSessionDetails(Long sessionId);
     void completeSession(Long sessionId);
-    List<CompletedSessionDetailsResponse> getCompletedSessions(Long userId);
+    List<CompletedSessionDetailsResponse> getCompletedSessions();
 }

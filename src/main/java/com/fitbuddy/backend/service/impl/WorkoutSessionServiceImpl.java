@@ -1,5 +1,9 @@
 package com.fitbuddy.backend.service.impl;
 
+import com.fitbuddy.backend.service.CurrentUserService;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.http.HttpStatus;
+import org.springframework.transaction.annotation.Transactional;
 import com.fitbuddy.backend.dto.CompletedSessionDetailsResponse;
 import com.fitbuddy.backend.dto.SessionDetailsResponse;
 import com.fitbuddy.backend.dto.StartSessionRequest;
@@ -15,11 +19,12 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
+@Transactional
 @Service
 @RequiredArgsConstructor
 public class WorkoutSessionServiceImpl implements WorkoutSessionService {
 
-    private final UserRepository userRepository;
+    private final CurrentUserService currentUserService;
     private final WorkoutTemplateRepository templateRepository;
     private final WorkoutSessionRepository sessionRepository;
     private final ExerciseLogRepository exerciseLogRepository;
@@ -28,11 +33,10 @@ public class WorkoutSessionServiceImpl implements WorkoutSessionService {
     @Override
     public WorkoutSessionResponse startSession(StartSessionRequest request) {
 
-        User user = userRepository.findById(request.getUserId())
-                .orElseThrow(() -> new RuntimeException("User not found"));
+        User user = currentUserService.getCurrentUser();
 
         WorkoutTemplate template = templateRepository.findById(request.getTemplateId())
-                .orElseThrow(() -> new RuntimeException("Template not found"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Template not found"));
 
         // 1. Create session
         WorkoutSession session = WorkoutSession.builder()
@@ -90,7 +94,9 @@ public class WorkoutSessionServiceImpl implements WorkoutSessionService {
     public SessionDetailsResponse getSessionDetails(Long sessionId) {
 
         WorkoutSession session = sessionRepository.findSessionWithDetails(sessionId)
-                .orElseThrow(() -> new RuntimeException("Session not found"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Session not found"));
+
+        requireOwner(session);
 
         List<SessionDetailsResponse.ExerciseItem> exerciseItems = new ArrayList<>();
 
@@ -130,18 +136,19 @@ public class WorkoutSessionServiceImpl implements WorkoutSessionService {
     public void completeSession(Long sessionId) {
 
         WorkoutSession session = sessionRepository.findById(sessionId)
-                .orElseThrow(() -> new RuntimeException("Session not found"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Session not found"));
 
+        requireOwner(session);
         session.setCompleted(true);
         session.setCompletedAt(LocalDateTime.now());
 
         sessionRepository.save(session);
     }
     @Override
-    public List<CompletedSessionDetailsResponse> getCompletedSessions(Long userId) {
+    public List<CompletedSessionDetailsResponse> getCompletedSessions() {
 
         List<WorkoutSession> sessions =
-                sessionRepository.findCompletedSessionsBasic(userId);
+                sessionRepository.findCompletedSessionsBasic(currentUserService.getCurrentUser().getId());
 
         return sessions.stream().map(session -> {
 
@@ -182,5 +189,12 @@ public class WorkoutSessionServiceImpl implements WorkoutSessionService {
                     .build();
 
         }).toList();
+    }
+
+    private void requireOwner(WorkoutSession session) {
+        if (!session.getUser().getId().equals(currentUserService.getCurrentUser().getId())) {
+            throw new ResponseStatusException(
+                    HttpStatus.NOT_FOUND, "Session not found");
+        }
     }
 }

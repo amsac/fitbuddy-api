@@ -1,0 +1,2107 @@
+FITBUDDY AUTHENTICATION REQUIREMENTS
+====================================
+
+Document Purpose
+----------------
+This document defines the authentication requirements for the FITBUDDY application.
+
+It is intended to be used as an implementation reference for Codex or another coding agent.
+
+The current application already has:
+- Spring Boot backend
+- PostgreSQL database
+- React / React Native clients
+- User entity
+- Workout templates
+- Workout sessions
+- Exercise logs
+- Set logs
+- Workout history
+
+Authentication was previously skipped and the clients used hardcoded userId = 1.
+
+This document replaces that approach with JWT-based authentication.
+
+
+============================================================
+1. AUTHENTICATION SCOPE - VERSION 1
+============================================================
+
+Authentication V1 should support:
+
+1. User registration
+2. User login
+3. JWT access token generation
+4. JWT validation for protected APIs
+5. Getting the currently authenticated user
+6. BCrypt password hashing
+7. TRAINER and STUDENT roles
+8. Both TRAINER and STUDENT can create workout templates for now
+9. User-specific APIs must derive the user from JWT instead of trusting userId sent by the frontend
+10. Architecture must remain ready for a future Forgot Password / Reset Password feature
+
+Do NOT implement the following in V1:
+- Refresh tokens
+- OAuth
+- Google login
+- Apple login
+- Facebook login
+- Email verification
+- Forgot password implementation
+- Reset password implementation
+- Role-specific authorization rules
+- Admin role
+- Token blacklist
+- Server-side JWT logout
+- Multi-factor authentication
+
+Logout in V1 simply means deleting the JWT token on the frontend.
+
+
+============================================================
+2. AUTHENTICATION MODEL
+============================================================
+
+Use:
+
+- Spring Security
+- JWT access token
+- BCryptPasswordEncoder
+- Email as the primary login identifier
+- Stateless authentication
+
+High-level flow:
+
+Client
+  -> POST /auth/login
+  -> Spring Security authenticates email/password
+  -> Backend creates JWT
+  -> Client stores JWT
+  -> Client sends JWT in Authorization header
+  -> JwtAuthenticationFilter validates token
+  -> Spring SecurityContext contains authenticated user
+  -> Controllers/services derive current user from authentication
+
+
+Authorization header format:
+
+Authorization: Bearer <jwt-token>
+
+
+IMPORTANT SECURITY RULE:
+
+The frontend must NOT be trusted to tell the backend which user is performing an action.
+
+Avoid user-specific request fields such as:
+
+{
+  "userId": 1
+}
+
+when the backend can determine the user from the JWT.
+
+
+============================================================
+3. USER ENTITY
+============================================================
+
+Existing User entity concept:
+
+User
+- id
+- name
+- email
+- role
+- createdAt
+
+Add:
+
+- password
+
+Recommended structure:
+
+@Entity
+@Table(name = "users")
+public class User {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false)
+    private String name;
+
+    @Column(nullable = false, unique = true)
+    private String email;
+
+    @Column(nullable = false)
+    private String password;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private Role role;
+
+    private LocalDateTime createdAt;
+}
+
+
+Role enum:
+
+public enum Role {
+    TRAINER,
+    STUDENT
+}
+
+
+IMPORTANT:
+- Never store plain text passwords.
+- Password values must always be BCrypt hashes.
+- Email should be stored normalized, preferably lowercase.
+- Email should remain unique.
+
+
+============================================================
+4. FUTURE FORGOT PASSWORD READINESS
+============================================================
+
+Forgot Password is NOT part of Auth V1.
+
+However, authentication should be designed so it can be added later without redesigning login.
+
+Use email as the login identifier.
+
+Future endpoints can be:
+
+POST /auth/forgot-password
+POST /auth/reset-password
+
+
+Future flow:
+
+User submits email
+  -> backend generates secure short-lived reset token
+  -> reset token is emailed to user
+  -> user submits reset token + new password
+  -> backend verifies token
+  -> password is replaced with a new BCrypt hash
+
+
+Do NOT add password reset token fields directly to User.
+
+Later create a separate entity such as:
+
+PasswordResetToken
+- id
+- user
+- tokenHash
+- expiresAt
+- usedAt
+- createdAt
+
+This entity is NOT required for V1.
+
+
+============================================================
+5. REQUIRED MAVEN DEPENDENCIES
+============================================================
+
+Spring Security:
+
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-security</artifactId>
+</dependency>
+
+
+JWT can use JJWT.
+
+Recommended dependencies:
+
+<dependency>
+    <groupId>io.jsonwebtoken</groupId>
+    <artifactId>jjwt-api</artifactId>
+    <version>${jjwt.version}</version>
+</dependency>
+
+<dependency>
+    <groupId>io.jsonwebtoken</groupId>
+    <artifactId>jjwt-impl</artifactId>
+    <version>${jjwt.version}</version>
+    <scope>runtime</scope>
+</dependency>
+
+<dependency>
+    <groupId>io.jsonwebtoken</groupId>
+    <artifactId>jjwt-jackson</artifactId>
+    <version>${jjwt.version}</version>
+    <scope>runtime</scope>
+</dependency>
+
+
+Continue using existing dependencies:
+- Spring Web
+- Spring Data JPA
+- PostgreSQL
+- Validation
+- Lombok
+
+
+============================================================
+6. RECOMMENDED PACKAGE STRUCTURE
+============================================================
+
+Example:
+
+com.fitbuddy.backend
+
+├── config
+│   └── SecurityConfig.java
+│
+├── security
+│   ├── JwtService.java
+│   ├── JwtAuthenticationFilter.java
+│   └── CustomUserDetailsService.java
+│
+├── controller
+│   └── AuthController.java
+│
+├── service
+│   └── AuthService.java
+│
+├── dto
+│   └── auth
+│       ├── RegisterRequest.java
+│       ├── LoginRequest.java
+│       ├── AuthResponse.java
+│       └── CurrentUserResponse.java
+│
+├── entity
+│   └── User.java
+│
+└── repository
+    └── UserRepository.java
+
+
+============================================================
+7. USER REPOSITORY
+============================================================
+
+Add:
+
+Optional<User> findByEmail(String email);
+
+boolean existsByEmail(String email);
+
+
+Recommended:
+
+public interface UserRepository extends JpaRepository<User, Long> {
+
+    Optional<User> findByEmail(String email);
+
+    boolean existsByEmail(String email);
+}
+
+
+Normalize email before lookup:
+
+email.trim().toLowerCase()
+
+
+============================================================
+8. REGISTER API
+============================================================
+
+Endpoint:
+
+POST /auth/register
+
+
+Purpose:
+
+Create a new user, hash the password, save the user, create JWT, and return the authenticated user response.
+
+
+Request:
+
+{
+  "name": "Akhil",
+  "email": "akhil@example.com",
+  "password": "StrongPassword123",
+  "role": "STUDENT"
+}
+
+
+Role behavior for V1:
+
+Allow:
+
+TRAINER
+STUDENT
+
+Both roles can register.
+
+Both roles have the same permissions for workout/template functionality for now.
+
+Role-based restrictions can be added later.
+
+
+Recommended validation:
+
+name:
+- required
+- not blank
+- reasonable maximum length
+
+email:
+- required
+- valid email format
+- unique
+
+password:
+- required
+- minimum 8 characters
+
+role:
+- required
+- TRAINER or STUDENT
+
+
+Example DTO:
+
+@Data
+public class RegisterRequest {
+
+    @NotBlank
+    private String name;
+
+    @Email
+    @NotBlank
+    private String email;
+
+    @NotBlank
+    @Size(min = 8)
+    private String password;
+
+    @NotNull
+    private Role role;
+}
+
+
+Registration logic:
+
+1. Normalize email.
+2. Check whether email already exists.
+3. If yes, return HTTP 409 Conflict.
+4. BCrypt-hash password.
+5. Create User.
+6. Save user.
+7. Generate JWT.
+8. Return AuthResponse.
+
+
+Success response:
+
+HTTP 201 Created
+
+{
+  "accessToken": "eyJhbGciOi...",
+  "tokenType": "Bearer",
+  "expiresIn": 86400,
+  "user": {
+    "id": 7,
+    "name": "Akhil",
+    "email": "akhil@example.com",
+    "role": "STUDENT"
+  }
+}
+
+
+The registration response should automatically authenticate the new user.
+
+The frontend should not need to call /auth/login immediately after successful registration.
+
+
+============================================================
+9. LOGIN API
+============================================================
+
+Endpoint:
+
+POST /auth/login
+
+
+Request:
+
+{
+  "email": "akhil@example.com",
+  "password": "StrongPassword123"
+}
+
+
+DTO:
+
+@Data
+public class LoginRequest {
+
+    @Email
+    @NotBlank
+    private String email;
+
+    @NotBlank
+    private String password;
+}
+
+
+Login flow:
+
+1. Normalize email.
+2. Authenticate using AuthenticationManager.
+3. Use email + password.
+4. Spring Security verifies the BCrypt password.
+5. Load User.
+6. Generate JWT.
+7. Return AuthResponse.
+
+
+Success response:
+
+HTTP 200 OK
+
+{
+  "accessToken": "eyJhbGciOi...",
+  "tokenType": "Bearer",
+  "expiresIn": 86400,
+  "user": {
+    "id": 7,
+    "name": "Akhil",
+    "email": "akhil@example.com",
+    "role": "STUDENT"
+  }
+}
+
+
+Invalid credentials response:
+
+HTTP 401 Unauthorized
+
+{
+  "timestamp": "2026-09-10T19:30:00",
+  "status": 401,
+  "error": "Unauthorized",
+  "message": "Invalid email or password",
+  "path": "/auth/login"
+}
+
+
+Do NOT reveal whether the email or password was specifically incorrect.
+
+Use:
+
+"Invalid email or password"
+
+instead of:
+
+"User not found"
+
+or:
+
+"Wrong password"
+
+
+============================================================
+10. GET CURRENT USER API
+============================================================
+
+Endpoint:
+
+GET /auth/me
+
+
+Header:
+
+Authorization: Bearer <jwt-token>
+
+
+Response:
+
+HTTP 200 OK
+
+{
+  "id": 7,
+  "name": "Akhil",
+  "email": "akhil@example.com",
+  "role": "STUDENT"
+}
+
+
+Purpose:
+
+- Restore authenticated user after app reload
+- Confirm token is still valid
+- Get current user profile/role
+- Avoid storing excessive user state in the frontend
+
+
+No token / invalid token:
+
+HTTP 401 Unauthorized
+
+
+============================================================
+11. LOGOUT
+============================================================
+
+No backend logout endpoint is required in V1.
+
+JWT authentication is stateless.
+
+Frontend logout:
+
+1. Remove JWT access token.
+2. Remove cached authenticated user.
+3. Navigate to Login screen.
+
+
+Do NOT create unnecessary token blacklist infrastructure in V1.
+
+
+============================================================
+12. AUTH RESPONSE DTO
+============================================================
+
+Recommended DTO:
+
+@Data
+@Builder
+public class AuthResponse {
+
+    private String accessToken;
+    private String tokenType;
+    private Long expiresIn;
+    private CurrentUserResponse user;
+}
+
+
+Current user DTO:
+
+@Data
+@Builder
+public class CurrentUserResponse {
+
+    private Long id;
+    private String name;
+    private String email;
+    private Role role;
+}
+
+
+Do NOT include password in any response.
+
+
+============================================================
+13. JWT CONTENT
+============================================================
+
+Recommended JWT claims:
+
+subject:
+- user's email
+
+Additional claims:
+- userId
+- role
+
+
+Conceptual JWT payload:
+
+{
+  "sub": "akhil@example.com",
+  "userId": 7,
+  "role": "STUDENT",
+  "iat": ...,
+  "exp": ...
+}
+
+
+Do NOT put sensitive information in JWT.
+
+Do NOT put:
+- password
+- password hash
+- reset token
+- private user data
+
+
+============================================================
+14. JWT EXPIRATION
+============================================================
+
+For V1, use a reasonably long-lived access token.
+
+Example:
+
+24 hours
+
+
+Configuration example:
+
+app.jwt.expiration-ms=86400000
+
+
+AuthResponse.expiresIn should be in seconds:
+
+86400
+
+
+Since there is no refresh token in V1:
+
+When JWT expires:
+- API returns 401
+- frontend clears authentication
+- user logs in again
+
+
+============================================================
+15. JWT SECRET
+============================================================
+
+Do NOT hardcode JWT secret in Java source code.
+
+Use environment configuration.
+
+
+Example:
+
+app.jwt.secret=${JWT_SECRET}
+
+
+Local development:
+
+JWT_SECRET=<secure-random-secret>
+
+
+Production:
+
+Set JWT_SECRET as an environment variable in Render or hosting environment.
+
+
+Secret must be sufficiently long and random.
+
+
+============================================================
+16. JWT SERVICE
+============================================================
+
+Create:
+
+JwtService
+
+
+Responsibilities:
+
+- generateToken(User user)
+- extractUsername(String token)
+- extractUserId(String token)
+- extractRole(String token)
+- validateToken(String token, UserDetails userDetails)
+- check expiration
+- parse claims
+
+
+Example conceptual methods:
+
+String generateToken(User user);
+
+String extractUsername(String token);
+
+boolean isTokenValid(String token, UserDetails userDetails);
+
+
+JwtService must NOT handle HTTP requests.
+
+Keep token logic isolated from controllers.
+
+
+============================================================
+17. CUSTOM USER DETAILS SERVICE
+============================================================
+
+Create:
+
+CustomUserDetailsService implements UserDetailsService
+
+
+Behavior:
+
+loadUserByUsername(String email)
+
+should:
+
+1. Normalize email if appropriate.
+2. Call UserRepository.findByEmail(email).
+3. Throw UsernameNotFoundException if absent.
+4. Return Spring Security UserDetails.
+
+
+Authority can use:
+
+ROLE_TRAINER
+ROLE_STUDENT
+
+
+Even though V1 does not enforce different permissions, preserving authorities now makes future authorization easier.
+
+
+============================================================
+18. JWT AUTHENTICATION FILTER
+============================================================
+
+Create:
+
+JwtAuthenticationFilter extends OncePerRequestFilter
+
+
+Flow:
+
+1. Read Authorization header.
+2. If header missing -> continue filter chain.
+3. If header does not start with "Bearer " -> continue.
+4. Extract token.
+5. Extract email from JWT.
+6. If authentication is not already present:
+   - load UserDetails
+   - validate token
+   - create UsernamePasswordAuthenticationToken
+   - set authentication in SecurityContextHolder
+7. Continue filter chain.
+
+
+Important:
+
+Invalid or expired JWT must NOT authenticate the request.
+
+
+============================================================
+19. SECURITY CONFIG
+============================================================
+
+Configure stateless Spring Security.
+
+
+Requirements:
+
+- Disable CSRF for the stateless REST API
+- SessionCreationPolicy.STATELESS
+- Permit /auth/register
+- Permit /auth/login
+- Protect application APIs
+- Add JwtAuthenticationFilter before UsernamePasswordAuthenticationFilter
+- Configure PasswordEncoder
+- Configure AuthenticationManager
+
+
+Conceptual access rules:
+
+PUBLIC:
+POST /auth/register
+POST /auth/login
+
+
+AUTHENTICATED:
+GET /auth/me
+GET /exercises/**
+GET /templates/**
+POST /templates
+POST /sessions/**
+POST /sets
+GET /sessions/**
+
+
+For V1:
+- TRAINER and STUDENT both have access to template creation.
+- Do NOT restrict POST /templates to TRAINER yet.
+
+
+Depending on application requirements, all endpoints except /auth/** can simply use:
+
+.anyRequest().authenticated()
+
+
+That is acceptable for V1.
+
+
+============================================================
+20. PASSWORD ENCODER
+============================================================
+
+Create bean:
+
+@Bean
+public PasswordEncoder passwordEncoder() {
+    return new BCryptPasswordEncoder();
+}
+
+
+Register:
+
+passwordEncoder.encode(request.getPassword())
+
+
+Login password verification should be handled by Spring AuthenticationManager / DaoAuthenticationProvider.
+
+
+Never manually compare:
+
+rawPassword.equals(user.getPassword())
+
+
+============================================================
+21. AUTH CONTROLLER
+============================================================
+
+Recommended controller:
+
+@RestController
+@RequestMapping("/auth")
+public class AuthController
+
+
+Endpoints:
+
+POST /auth/register
+POST /auth/login
+GET /auth/me
+
+
+Possible signatures:
+
+@PostMapping("/register")
+public ResponseEntity<AuthResponse> register(
+    @Valid @RequestBody RegisterRequest request
+)
+
+@PostMapping("/login")
+public ResponseEntity<AuthResponse> login(
+    @Valid @RequestBody LoginRequest request
+)
+
+@GetMapping("/me")
+public CurrentUserResponse getCurrentUser(
+    Authentication authentication
+)
+
+
+Keep business logic in AuthService.
+
+
+============================================================
+22. AUTH SERVICE
+============================================================
+
+Create:
+
+AuthService
+
+
+Responsibilities:
+
+register(RegisterRequest request)
+
+login(LoginRequest request)
+
+getCurrentUser(...)
+
+
+Registration:
+- check duplicate
+- encode password
+- save user
+- generate JWT
+- return response
+
+
+Login:
+- authenticate
+- load user
+- generate JWT
+- return response
+
+
+Do not move database logic into controller.
+
+
+============================================================
+23. GLOBAL ERROR FORMAT
+============================================================
+
+Prefer consistent error responses.
+
+
+Example validation error:
+
+HTTP 400
+
+{
+  "timestamp": "2026-09-10T19:30:00",
+  "status": 400,
+  "error": "Bad Request",
+  "message": "Validation failed",
+  "fieldErrors": {
+    "email": "must be a well-formed email address",
+    "password": "size must be between 8 and 2147483647"
+  },
+  "path": "/auth/register"
+}
+
+
+Duplicate email:
+
+HTTP 409
+
+{
+  "timestamp": "2026-09-10T19:30:00",
+  "status": 409,
+  "error": "Conflict",
+  "message": "An account with this email already exists",
+  "path": "/auth/register"
+}
+
+
+Invalid credentials:
+
+HTTP 401
+
+{
+  "timestamp": "2026-09-10T19:30:00",
+  "status": 401,
+  "error": "Unauthorized",
+  "message": "Invalid email or password",
+  "path": "/auth/login"
+}
+
+
+Missing/expired/invalid token:
+
+HTTP 401
+
+{
+  "timestamp": "2026-09-10T19:30:00",
+  "status": 401,
+  "error": "Unauthorized",
+  "message": "Authentication required",
+  "path": "/sessions/me/completed"
+}
+
+
+Forbidden can be added later when role-based authorization is introduced:
+
+HTTP 403 Forbidden
+
+
+============================================================
+24. MODIFY EXISTING TEMPLATE CREATE API
+============================================================
+
+CURRENT REQUEST EXAMPLE:
+
+POST /templates
+
+{
+  "name": "Beginner Chest Workout",
+  "description": "Simple chest routine",
+  "level": "BEGINNER",
+  "createdBy": 1,
+  "exercises": [
+    {
+      "exerciseId": 1,
+      "targetSets": 3,
+      "targetReps": 10
+    }
+  ]
+}
+
+
+REMOVE:
+
+"createdBy": 1
+
+
+NEW REQUEST:
+
+POST /templates
+
+Authorization: Bearer <jwt-token>
+
+{
+  "name": "Beginner Chest Workout",
+  "description": "Simple chest routine",
+  "level": "BEGINNER",
+  "exercises": [
+    {
+      "exerciseId": 1,
+      "targetSets": 3,
+      "targetReps": 10
+    }
+  ]
+}
+
+
+Backend should:
+
+1. Get authenticated user.
+2. Resolve User entity.
+3. Set template.createdBy = authenticatedUser.
+4. Save template.
+
+
+Both TRAINER and STUDENT may do this in V1.
+
+
+============================================================
+25. MODIFY START WORKOUT API
+============================================================
+
+CURRENT:
+
+POST /sessions/start
+
+{
+  "userId": 1,
+  "templateId": 10
+}
+
+
+NEW:
+
+POST /sessions/start
+
+Authorization: Bearer <jwt-token>
+
+{
+  "templateId": 10
+}
+
+
+Backend should:
+
+1. Determine authenticated user from Spring Security.
+2. Load actual User entity.
+3. Create WorkoutSession using that user.
+4. Ignore/remove userId from request DTO.
+
+
+Updated DTO:
+
+@Data
+public class StartSessionRequest {
+    private Long templateId;
+}
+
+
+Security benefit:
+
+A malicious client cannot start sessions pretending to be another user.
+
+
+============================================================
+26. MODIFY WORKOUT HISTORY API
+============================================================
+
+CURRENT:
+
+GET /sessions/users/{userId}/completed
+
+
+NEW:
+
+GET /sessions/me/completed
+
+
+Header:
+
+Authorization: Bearer <jwt-token>
+
+
+Response remains detailed, for example:
+
+[
+  {
+    "sessionId": 7,
+    "templateName": "Intermediate Shoulder Press",
+    "date": "2026-04-19",
+    "completedAt": "2026-04-19T16:14:37.470071",
+    "exercises": [
+      {
+        "exerciseName": "Seated Shoulder Press",
+        "sets": [
+          {
+            "setNumber": 1,
+            "reps": 10,
+            "weight": 10.0
+          },
+          {
+            "setNumber": 2,
+            "reps": 10,
+            "weight": 12.0
+          }
+        ]
+      },
+      {
+        "exerciseName": "Lateral Raise",
+        "sets": [
+          {
+            "setNumber": 1,
+            "reps": 12,
+            "weight": 7.5
+          }
+        ]
+      }
+    ]
+  }
+]
+
+
+Backend should derive userId from authentication.
+
+
+============================================================
+27. SESSION DETAILS SECURITY
+============================================================
+
+Existing:
+
+GET /sessions/{sessionId}
+
+
+After auth, do NOT return a session solely because the ID exists.
+
+Verify:
+
+session.user.id == authenticatedUser.id
+
+
+Otherwise return:
+
+HTTP 404 or HTTP 403
+
+
+Recommended approach for avoiding resource enumeration:
+
+404 Not Found
+
+
+This prevents one user from retrieving another user's workout by changing the session ID.
+
+
+============================================================
+28. LOG SET SECURITY
+============================================================
+
+Existing:
+
+POST /sets
+
+{
+  "exerciseLogId": 101,
+  "reps": 10,
+  "weight": 40
+}
+
+
+This request can remain structurally unchanged.
+
+
+But backend MUST verify ownership:
+
+exerciseLog
+  -> workoutSession
+  -> user
+
+must equal:
+
+authenticatedUser
+
+
+A user must not be able to submit a set for another user's exerciseLogId.
+
+
+============================================================
+29. COMPLETE SESSION SECURITY
+============================================================
+
+Existing:
+
+POST /sessions/{id}/complete
+
+
+No request body.
+
+
+After auth:
+
+Backend must ensure:
+
+session.user.id == authenticatedUser.id
+
+
+Only owner of the workout session can complete it.
+
+
+============================================================
+30. TEMPLATE READ SECURITY
+============================================================
+
+For V1:
+
+GET /templates
+GET /templates/{id}
+
+can be accessible to all authenticated users.
+
+
+Template creation:
+
+POST /templates
+
+also accessible to both TRAINER and STUDENT.
+
+
+Future authorization may change this.
+
+
+============================================================
+31. EXERCISE CATALOG SECURITY
+============================================================
+
+Recommended V1:
+
+GET /exercises
+
+requires authentication.
+
+
+This keeps API behavior consistent:
+
+Only:
+
+/auth/register
+/auth/login
+
+are public.
+
+
+============================================================
+32. GETTING THE AUTHENTICATED USER IN SERVICES
+============================================================
+
+Avoid repeatedly parsing JWT manually inside controllers/services.
+
+JWT filter should already populate Spring SecurityContext.
+
+
+Possible approach:
+
+Authentication authentication =
+    SecurityContextHolder.getContext().getAuthentication();
+
+String email = authentication.getName();
+
+User currentUser = userRepository.findByEmail(email)
+    .orElseThrow(...);
+
+
+Better:
+
+Create reusable helper/service such as:
+
+CurrentUserService
+
+
+Example:
+
+public User getCurrentUser() {
+    Authentication authentication =
+        SecurityContextHolder.getContext().getAuthentication();
+
+    String email = authentication.getName();
+
+    return userRepository.findByEmail(email)
+        .orElseThrow(() -> new RuntimeException("Authenticated user not found"));
+}
+
+
+Then existing services can use:
+
+User currentUser = currentUserService.getCurrentUser();
+
+
+This avoids repeating authentication extraction everywhere.
+
+
+============================================================
+33. DATABASE MIGRATION
+============================================================
+
+Existing users may not have passwords.
+
+During development, plan migration carefully.
+
+
+Add password column.
+
+Example development SQL:
+
+ALTER TABLE users ADD COLUMN password VARCHAR(255);
+
+
+If making password NOT NULL immediately, existing rows will fail unless passwords are populated.
+
+Development options:
+
+Option A:
+- recreate development users
+
+Option B:
+- add nullable password first
+- update existing users with BCrypt hashes
+- then set NOT NULL
+
+
+Preferred for local MVP:
+
+Recreate or update test users.
+
+
+Do NOT insert raw passwords into password column.
+
+Use BCrypt hashes.
+
+
+============================================================
+34. CORS
+============================================================
+
+Ensure Spring Security CORS configuration supports current frontend clients.
+
+
+Local examples may include:
+
+http://localhost:5173
+http://localhost:3000
+
+
+React Native/Expo behavior differs from browser CORS, but backend should still preserve existing frontend support.
+
+
+Do not accidentally break the existing React web frontend when enabling Spring Security.
+
+
+============================================================
+35. FRONTEND AUTH FLOW
+============================================================
+
+Required screens:
+
+LoginScreen
+RegisterScreen
+
+
+Authenticated navigation:
+
+Unauthenticated:
+- Login
+- Register
+
+Authenticated:
+- Dashboard
+- Exercises
+- Templates
+- Workout
+- History
+
+
+App startup flow:
+
+Application starts
+   -> check stored JWT
+   -> if no JWT:
+        show Login
+   -> if JWT:
+        call GET /auth/me
+   -> if successful:
+        restore user
+        show authenticated app
+   -> if 401:
+        remove JWT
+        show Login
+
+
+============================================================
+36. FRONTEND TOKEN STORAGE
+============================================================
+
+WEB:
+
+Avoid unnecessarily exposing token handling across components.
+
+Use a centralized auth store/context.
+
+
+REACT NATIVE:
+
+For production mobile authentication, prefer secure storage such as Expo SecureStore for JWT tokens.
+
+Do not use plain AsyncStorage as the preferred long-term location for sensitive authentication tokens.
+
+
+============================================================
+37. AXIOS CLIENT
+============================================================
+
+Use a centralized Axios instance.
+
+
+Conceptual:
+
+const api = axios.create({
+  baseURL: API_BASE_URL
+});
+
+
+Add request interceptor:
+
+api.interceptors.request.use((config) => {
+
+  const token = authStore.getToken();
+
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+
+  return config;
+});
+
+
+Do not manually attach JWT in every API function.
+
+
+============================================================
+38. AXIOS 401 HANDLING
+============================================================
+
+Since V1 has no refresh token:
+
+When backend returns 401:
+
+1. Clear access token.
+2. Clear authenticated user.
+3. Redirect to login.
+
+
+Avoid infinite redirect/interceptor loops.
+
+
+Do not automatically retry with refresh token because refresh tokens are explicitly out of scope for V1.
+
+
+============================================================
+39. FRONTEND AUTH STATE
+============================================================
+
+Recommended state:
+
+{
+  user: null | {
+    id,
+    name,
+    email,
+    role
+  },
+
+  accessToken: null | string,
+
+  isAuthenticated: boolean,
+
+  isLoading: boolean
+}
+
+
+Actions:
+
+login()
+register()
+logout()
+restoreSession()
+
+
+============================================================
+40. LOGIN SCREEN UX
+============================================================
+
+Fields:
+
+Email
+Password
+
+
+Actions:
+
+Login
+Navigate to Register
+
+
+UX:
+- hide password by default
+- password visibility toggle
+- loading state
+- disable submit while request is active
+- friendly server-side error
+- keyboard-friendly mobile form
+- no browser alerts
+
+
+============================================================
+41. REGISTER SCREEN UX
+============================================================
+
+Fields:
+
+Name
+Email
+Password
+Role
+
+
+Role options:
+
+STUDENT
+TRAINER
+
+
+For now both are allowed.
+
+
+UI can use:
+
+Student
+Trainer
+
+while API values remain:
+
+STUDENT
+TRAINER
+
+
+After successful registration:
+
+1. Store accessToken.
+2. Store user.
+3. Navigate to Dashboard.
+
+
+============================================================
+42. PASSWORD UX
+============================================================
+
+Minimum V1 rule:
+
+8 characters
+
+
+Do not overcomplicate password requirements for MVP.
+
+
+Future Forgot Password link can appear in UI as disabled/not implemented, or simply be omitted until the backend feature exists.
+
+
+Architecture should allow adding:
+
+Forgot Password?
+Reset Password
+
+
+later without changing login behavior.
+
+
+============================================================
+43. CURRENT USER ID REMOVAL
+============================================================
+
+Search the entire application for:
+
+userId = 1
+hardcoded userId
+createdBy = 1
+/users/1/
+/sessions/users/1/
+
+
+Remove hardcoded identity assumptions.
+
+
+Authenticated identity should come from JWT.
+
+
+============================================================
+44. API SUMMARY
+============================================================
+
+PUBLIC
+
+POST /auth/register
+
+Request:
+{
+  "name": "Akhil",
+  "email": "akhil@example.com",
+  "password": "StrongPassword123",
+  "role": "STUDENT"
+}
+
+Response:
+{
+  "accessToken": "...",
+  "tokenType": "Bearer",
+  "expiresIn": 86400,
+  "user": {
+    "id": 7,
+    "name": "Akhil",
+    "email": "akhil@example.com",
+    "role": "STUDENT"
+  }
+}
+
+
+POST /auth/login
+
+Request:
+{
+  "email": "akhil@example.com",
+  "password": "StrongPassword123"
+}
+
+Response:
+{
+  "accessToken": "...",
+  "tokenType": "Bearer",
+  "expiresIn": 86400,
+  "user": {
+    "id": 7,
+    "name": "Akhil",
+    "email": "akhil@example.com",
+    "role": "STUDENT"
+  }
+}
+
+
+AUTHENTICATED
+
+GET /auth/me
+
+Response:
+{
+  "id": 7,
+  "name": "Akhil",
+  "email": "akhil@example.com",
+  "role": "STUDENT"
+}
+
+
+GET /exercises
+
+
+GET /templates
+
+
+GET /templates/{id}
+
+
+POST /templates
+
+Request:
+{
+  "name": "Chest Day",
+  "description": "Chest workout",
+  "level": "BEGINNER",
+  "exercises": [
+    {
+      "exerciseId": 1,
+      "targetSets": 3,
+      "targetReps": 10
+    }
+  ]
+}
+
+Important:
+No createdBy field.
+Backend uses authenticated user.
+
+
+POST /sessions/start
+
+Request:
+{
+  "templateId": 10
+}
+
+Important:
+No userId.
+Backend uses authenticated user.
+
+
+POST /sets
+
+Request:
+{
+  "exerciseLogId": 101,
+  "reps": 10,
+  "weight": 40
+}
+
+Backend must verify ExerciseLog belongs to authenticated user.
+
+
+GET /sessions/{sessionId}
+
+Backend must verify ownership.
+
+
+POST /sessions/{sessionId}/complete
+
+No request body.
+
+Backend must verify ownership.
+
+
+GET /sessions/me/completed
+
+Backend derives current user from JWT.
+
+
+============================================================
+45. REQUIRED BACKEND CLASSES
+============================================================
+
+Implement or update:
+
+Entity:
+- User
+- Role
+
+
+Repository:
+- UserRepository
+
+
+DTOs:
+- RegisterRequest
+- LoginRequest
+- AuthResponse
+- CurrentUserResponse
+
+
+Security:
+- JwtService
+- JwtAuthenticationFilter
+- CustomUserDetailsService
+
+
+Config:
+- SecurityConfig
+
+
+Services:
+- AuthService
+- CurrentUserService
+
+
+Controller:
+- AuthController
+
+
+Error handling:
+- GlobalExceptionHandler
+- duplicate email exception
+- authentication error handling
+
+
+Update existing services:
+- WorkoutTemplateService
+- WorkoutSessionService
+- SetLogService
+- completed history service
+
+
+============================================================
+46. REQUIRED EXISTING CODE CHANGES
+============================================================
+
+1. Remove hardcoded userId = 1.
+
+2. Remove createdBy from CreateWorkoutTemplateRequest.
+
+3. Remove userId from StartSessionRequest.
+
+4. Change workout history from:
+
+GET /sessions/users/{userId}/completed
+
+to:
+
+GET /sessions/me/completed
+
+
+5. Template service must use authenticated user as createdBy.
+
+6. Session start must use authenticated user.
+
+7. GET /sessions/{id} must check ownership.
+
+8. POST /sessions/{id}/complete must check ownership.
+
+9. POST /sets must verify exercise log ownership.
+
+10. Frontend API client must attach JWT automatically.
+
+11. Frontend must add Login/Register flow.
+
+12. App startup must restore identity using GET /auth/me.
+
+
+============================================================
+47. SECURITY PRINCIPLES
+============================================================
+
+Always follow these rules:
+
+- Never store plain passwords.
+- Never return password hashes.
+- Never trust userId from frontend for authenticated-user actions.
+- Never hardcode JWT secrets.
+- Never put secrets into JWT claims.
+- Validate session/exercise log ownership.
+- Use HTTPS in production.
+- Normalize email addresses.
+- Return generic invalid-login errors.
+- Keep JWT logic centralized.
+- Keep auth logic out of controllers where possible.
+
+
+============================================================
+48. IMPLEMENTATION ORDER
+============================================================
+
+Recommended order:
+
+PHASE 1 - DATABASE
+1. Add password field to User.
+2. Handle existing dev users.
+3. Ensure email unique.
+
+
+PHASE 2 - SECURITY FOUNDATION
+4. Add Spring Security dependency.
+5. Add JWT dependencies.
+6. Add PasswordEncoder.
+7. Implement UserDetailsService.
+8. Implement JwtService.
+9. Implement JwtAuthenticationFilter.
+10. Implement SecurityConfig.
+
+
+PHASE 3 - AUTH API
+11. Implement RegisterRequest.
+12. Implement LoginRequest.
+13. Implement response DTOs.
+14. Implement AuthService.
+15. Implement AuthController.
+16. Add error handling.
+
+
+PHASE 4 - TEST AUTH
+17. Register user.
+18. Login user.
+19. Call /auth/me with token.
+20. Confirm protected endpoint without token gives 401.
+21. Confirm protected endpoint with token succeeds.
+
+
+PHASE 5 - REMOVE HARDCODED USER ID
+22. Update template creation.
+23. Update workout session start.
+24. Update history.
+25. Add ownership checks for session details.
+26. Add ownership checks for session completion.
+27. Add ownership checks for set logging.
+
+
+PHASE 6 - FRONTEND
+28. Create Login screen.
+29. Create Register screen.
+30. Add auth state/store.
+31. Add token persistence.
+32. Add Axios interceptor.
+33. Add authenticated navigation.
+34. Restore session with /auth/me.
+35. Remove all hardcoded userId usage.
+
+
+============================================================
+49. BASIC TEST CASES
+============================================================
+
+REGISTRATION
+
+1.
+New email + valid password
+Expected:
+201 + JWT + user
+
+
+2.
+Existing email
+Expected:
+409
+
+
+3.
+Invalid email
+Expected:
+400
+
+
+4.
+Password under 8 characters
+Expected:
+400
+
+
+LOGIN
+
+5.
+Correct email/password
+Expected:
+200 + JWT
+
+
+6.
+Wrong password
+Expected:
+401
+
+
+7.
+Unknown email
+Expected:
+401 with same generic message
+
+
+AUTHENTICATED REQUESTS
+
+8.
+GET /auth/me with valid JWT
+Expected:
+200
+
+
+9.
+GET /auth/me without JWT
+Expected:
+401
+
+
+10.
+GET /auth/me with expired JWT
+Expected:
+401
+
+
+11.
+GET protected endpoint with malformed JWT
+Expected:
+401
+
+
+OWNERSHIP
+
+12.
+User A tries to GET User B session
+Expected:
+404 or 403
+
+
+13.
+User A tries to log a set using User B exerciseLogId
+Expected:
+404 or 403
+
+
+14.
+User A tries to complete User B workout
+Expected:
+404 or 403
+
+
+TEMPLATES
+
+15.
+STUDENT creates template
+Expected:
+success
+
+
+16.
+TRAINER creates template
+Expected:
+success
+
+
+============================================================
+50. ACCEPTANCE CRITERIA
+============================================================
+
+Authentication V1 is complete when:
+
+1. A new user can register.
+2. Password is BCrypt-hashed in PostgreSQL.
+3. Registration returns JWT.
+4. Existing user can log in.
+5. Invalid credentials return 401.
+6. JWT is required for application APIs.
+7. GET /auth/me returns current user.
+8. React / React Native can store JWT and restore session.
+9. No hardcoded userId = 1 remains for authenticated operations.
+10. Template creation uses authenticated user.
+11. Workout session start uses authenticated user.
+12. Workout history uses authenticated user.
+13. Session ownership is enforced.
+14. Exercise log / set ownership is enforced.
+15. Both TRAINER and STUDENT can create templates.
+16. No refresh-token implementation exists.
+17. Authentication design remains compatible with future Forgot Password support.
+
+
+============================================================
+51. NOTES FOR CODEX
+============================================================
+
+IMPORTANT IMPLEMENTATION GUIDANCE:
+
+- Inspect the existing repository before creating duplicate classes.
+- Reuse existing User, Role, repositories, DTO conventions and exception-handling patterns where possible.
+- Do not unnecessarily rewrite working workout APIs.
+- Make the smallest clean changes required to integrate authentication.
+- Preserve existing workout behavior.
+- Preserve existing completed-workout response structure.
+- Do not introduce refresh tokens.
+- Do not add role restrictions between TRAINER and STUDENT yet.
+- Do not implement Forgot Password yet.
+- Keep the architecture extensible enough to add Forgot Password later.
+- Remove all hardcoded user IDs from authenticated flows.
+- Use authenticated identity from Spring Security.
+- Ensure existing React web UI still works after CORS/security changes.
+- Keep implementation production-minded but avoid unnecessary overengineering for this MVP.
+
+
+END OF DOCUMENT

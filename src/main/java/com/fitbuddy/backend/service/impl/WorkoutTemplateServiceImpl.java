@@ -1,5 +1,9 @@
 package com.fitbuddy.backend.service.impl;
 
+import com.fitbuddy.backend.service.CurrentUserService;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.http.HttpStatus;
+import org.springframework.transaction.annotation.Transactional;
 import com.fitbuddy.backend.dto.CreateWorkoutTemplateRequest;
 import com.fitbuddy.backend.dto.WorkoutTemplateResponse;
 import com.fitbuddy.backend.entity.*;
@@ -12,6 +16,7 @@ import org.springframework.stereotype.Service;
 import java.util.ArrayList;
 import java.util.List;
 
+@Transactional
 @Service
 @RequiredArgsConstructor
 public class WorkoutTemplateServiceImpl implements WorkoutTemplateService {
@@ -19,22 +24,11 @@ public class WorkoutTemplateServiceImpl implements WorkoutTemplateService {
     private final WorkoutTemplateRepository templateRepository;
     private final WorkoutTemplateExerciseRepository templateExerciseRepository;
     private final ExerciseRepository exerciseRepository;
-    private final UserRepository userRepository;
+    private final CurrentUserService currentUserService;
 
     @Override
     public WorkoutTemplateResponse createTemplate(CreateWorkoutTemplateRequest request) {
-        System.out.println("------Trainer ID: " + request.getCreatedBy());
-
-//        userRepository.findAll().forEach(user -> {
-//            System.out.println(
-//                    "ID: " + user.getId() +
-//                            ", Name: " + user.getName() +
-//                            ", Email: " + user.getEmail()
-//            );
-//        });
-
-        User trainer = userRepository.findById(request.getCreatedBy())
-                .orElseThrow(() -> new RuntimeException("Trainer not found"));
+        User trainer = currentUserService.getCurrentUser();
 
         WorkoutTemplate template = WorkoutTemplate.builder()
                 .name(request.getName())
@@ -49,8 +43,11 @@ public class WorkoutTemplateServiceImpl implements WorkoutTemplateService {
 
         for (CreateWorkoutTemplateRequest.ExerciseItem item : request.getExercises()) {
 
-            Exercise exercise = exerciseRepository.findByExternalId(item.getExternalId())
-                    .orElseThrow(() -> new RuntimeException("Exercise not found"));
+            Exercise exercise = (item.getExerciseId() != null
+                    ? exerciseRepository.findById(item.getExerciseId())
+                    : exerciseRepository.findByExternalId(item.getExternalId()))
+                    .orElseThrow(() -> new ResponseStatusException(
+                            HttpStatus.NOT_FOUND, "Exercise not found"));
 
             WorkoutTemplateExercise te = WorkoutTemplateExercise.builder()
                     .workoutTemplate(template)
@@ -81,7 +78,7 @@ public class WorkoutTemplateServiceImpl implements WorkoutTemplateService {
     public WorkoutTemplateResponse getTemplateById(Long id) {
 
         WorkoutTemplate template = templateRepository.findByIdWithExercises(id)
-                .orElseThrow(() -> new RuntimeException("Template not found"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Template not found"));
 
         return WorkoutTemplateMapper.toResponse(template);
     }

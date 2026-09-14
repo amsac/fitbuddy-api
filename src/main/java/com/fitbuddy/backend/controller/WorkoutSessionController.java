@@ -11,7 +11,6 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 
-@CrossOrigin(origins = "*")
 @RestController
 @RequestMapping("/sessions")
 @RequiredArgsConstructor
@@ -31,10 +30,8 @@ public class WorkoutSessionController {
     public void completeSession(@PathVariable Long id) {
         sessionService.completeSession(id);
     }
-    @GetMapping("/users/{userId}/completed")
-    public List<CompletedSessionDetailsResponse> getCompletedSessions(
-            @PathVariable Long userId
-    ) {
-        return sessionService.getCompletedSessions(userId);
+    @GetMapping("/me/completed")
+    public List<CompletedSessionDetailsResponse> getCompletedSessions() {
+        return sessionService.getCompletedSessions();
     }
 }

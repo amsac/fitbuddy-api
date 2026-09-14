@@ -6,7 +6,6 @@ import com.fitbuddy.backend.service.SetLogService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
-@CrossOrigin(origins = "*")
 @RestController
 @RequestMapping("/sets")
 @RequiredArgsConstructor

@@ -31,6 +31,16 @@ public class User {
 
     @OneToMany(mappedBy = "user", cascade = CascadeType.ALL)
     private List<WorkoutSession> workoutSessions;
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private String password;
+
+    @Builder.Default
+    private boolean isActive = true;
+
+    @PrePersist
+    public void setCreatedAt() {
+        this.createdAt = LocalDateTime.now();
+    }
 
     public enum Role {
         TRAINER,

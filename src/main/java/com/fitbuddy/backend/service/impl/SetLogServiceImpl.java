@@ -1,5 +1,9 @@
 package com.fitbuddy.backend.service.impl;
 
+import com.fitbuddy.backend.service.CurrentUserService;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.http.HttpStatus;
+import org.springframework.transaction.annotation.Transactional;
 import com.fitbuddy.backend.dto.LogSetRequest;
 import com.fitbuddy.backend.dto.SetLogResponse;
 import com.fitbuddy.backend.entity.ExerciseLog;
@@ -12,10 +16,12 @@ import org.springframework.stereotype.Service;
 
 import java.util.List;
 
+@Transactional
 @Service
 @RequiredArgsConstructor
 public class SetLogServiceImpl implements SetLogService {
 
+    private final CurrentUserService currentUserService;
     private final SetLogRepository setLogRepository;
     private final ExerciseLogRepository exerciseLogRepository;
 
@@ -24,7 +30,12 @@ public class SetLogServiceImpl implements SetLogService {
 
         // 1. Fetch ExerciseLog
         ExerciseLog exerciseLog = exerciseLogRepository.findById(request.getExerciseLogId())
-                .orElseThrow(() -> new RuntimeException("ExerciseLog not found"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "ExerciseLog not found"));
+
+        if (!exerciseLog.getWorkoutSession().getUser().getId().equals(currentUserService.getCurrentUser().getId())) {
+            throw new ResponseStatusException(
+                    HttpStatus.NOT_FOUND, "ExerciseLog not found");
+        }
 
         // 2. Get existing sets
         List<SetLog> existingSets = setLogRepository.findByExerciseLogId(request.getExerciseLogId());
